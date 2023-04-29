@@ -1,0 +1,259 @@
+https://learn.microsoft.com/en-us/training/modules/design-multidimensional-schema-to-optimize-analytical-workloads/3-create-tables
+#Creating dimension tables
+#When you create a dimension table, ensure that the table definition includes surrogate and alternate keys as well as columns for the attributes of the dimension that you want to use to group aggregations
+#It's often easiest to use an IDENTITY column to auto-generate an incrementing surrogate key (otherwise you need to generate unique keys every time you load data). 
+#The following example shows a CREATE TABLE statement for a hypothetical DimCustomer dimension table.
+CREATE TABLE dbo.DimCustomer
+(
+    CustomerKey INT IDENTITY NOT NULL,
+    CustomerAlternateKey NVARCHAR(15) NULL,
+    CustomerName NVARCHAR(80) NOT NULL,
+    EmailAddress NVARCHAR(50) NULL,
+    Phone NVARCHAR(25) NULL,
+    StreetAddress NVARCHAR(100),
+    City NVARCHAR(20),
+    PostalCode NVARCHAR(10),
+    CountryRegion NVARCHAR(20)
+)
+WITH
+(
+    DISTRIBUTION = REPLICATE,
+    CLUSTERED COLUMNSTORE INDEX
+);
+
+#Note: If desired, you can create a specific schema as a namespace for your tables. In this example, the default dbo schema is used.
+
+#If you intend to use a snowflake schema in which dimension tables are related to one another, you should include the key for the parent dimension in the definition of the child dimension table
+#For example, the following SQL code could be used to move the geographical address details from the DimCustomer table to a separate DimGeography dimension table:
+
+CREATE TABLE dbo.DimGeography
+(
+    GeographyKey INT IDENTITY NOT NULL,
+    GeographyAlternateKey NVARCHAR(10) NULL,
+    StreetAddress NVARCHAR(100),
+    City NVARCHAR(20),
+    PostalCode NVARCHAR(10),
+    CountryRegion NVARCHAR(20)
+)
+WITH
+(
+    DISTRIBUTION = REPLICATE,
+    CLUSTERED COLUMNSTORE INDEX
+);
+
+CREATE TABLE dbo.DimCustomer
+(
+    CustomerKey INT IDENTITY NOT NULL,
+    CustomerAlternateKey NVARCHAR(15) NULL,
+    GeographyKey INT NULL,
+    CustomerName NVARCHAR(80) NOT NULL,
+    EmailAddress NVARCHAR(50) NULL,
+    Phone NVARCHAR(25) NULL
+)
+WITH
+(
+    DISTRIBUTION = REPLICATE,
+    CLUSTERED COLUMNSTORE INDEX
+);
+
+#Time dimension tables
+
+#Most data warehouses include a time dimension table that enables you to aggregate data by multiple hierarchical levels of time interval.
+#For example, the following example creates a DimDate table with attributes that relate to specific dates
+CREATE TABLE dbo.DimDate
+( 
+    DateKey INT NOT NULL,
+    DateAltKey DATETIME NOT NULL,
+    DayOfMonth INT NOT NULL,
+    DayOfWeek INT NOT NULL,
+    DayName NVARCHAR(15) NOT NULL,
+    MonthOfYear INT NOT NULL,
+    MonthName NVARCHAR(15) NOT NULL,
+    CalendarQuarter INT  NOT NULL,
+    CalendarYear INT NOT NULL,
+    FiscalQuarter INT NOT NULL,
+    FiscalYear INT NOT NULL
+)
+WITH
+(
+    DISTRIBUTION = REPLICATE,
+    CLUSTERED COLUMNSTORE INDEX
+);
+
+#Creating fact tables
+
+#Fact tables include the keys for each dimension to which they're related, and the attributes and numeric measures for specific events or observations that you want to analyze
+#The following code example creates a hypothetical fact table named FactSales that is related to multiple dimensions through key columns (date, customer, product, and store)
+CREATE TABLE dbo.FactSales
+(
+    OrderDateKey INT NOT NULL,
+    CustomerKey INT NOT NULL,
+    ProductKey INT NOT NULL,
+    StoreKey INT NOT NULL,
+    OrderNumber NVARCHAR(10) NOT NULL,
+    OrderLineItem INT NOT NULL,
+    OrderQuantity SMALLINT NOT NULL,
+    UnitPrice DECIMAL NOT NULL,
+    Discount DECIMAL NOT NULL,
+    Tax DECIMAL NOT NULL,
+    SalesAmount DECIMAL NOT NULL
+)
+WITH
+(
+    DISTRIBUTION = HASH(OrderNumber),
+    CLUSTERED COLUMNSTORE INDEX
+);
+
+#Creating staging tables
+
+#Staging tables are used as temporary storage for data as it's being loaded into the data warehouse
+#The following code example creates a staging table for product data that will ultimately be loaded into a dimension table:
+CREATE TABLE dbo.StageProduct
+(
+    ProductID NVARCHAR(10) NOT NULL,
+    ProductName NVARCHAR(200) NOT NULL,
+    ProductCategory NVARCHAR(200) NOT NULL,
+    Color NVARCHAR(10),
+    Size NVARCHAR(10),
+    ListPrice DECIMAL NOT NULL,
+    Discontinued BIT NOT NULL
+)
+WITH
+(
+    DISTRIBUTION = ROUND_ROBIN,
+    CLUSTERED COLUMNSTORE INDEX
+);
+
+#Using external tables
+#In some cases, if the data to be loaded is in files with an appropriate structure, it can be more effective to create external tables that reference the file location
+#This way, the data can be read directly from the source files instead of being loaded into the relational store
+#The following example, shows how to create an external table that references files in the data lake associated with the Synapse workspace:
+-- External data source links to data lake location
+CREATE EXTERNAL DATA SOURCE StagedFiles
+WITH (
+    LOCATION = 'https://mydatalake.blob.core.windows.net/data/stagedfiles/'
+);
+GO
+
+-- External format specifies file format
+CREATE EXTERNAL FILE FORMAT ParquetFormat
+WITH (
+    FORMAT_TYPE = PARQUET,
+    DATA_COMPRESSION = 'org.apache.hadoop.io.compress.SnappyCodec'
+);
+GO
+
+-- External table references files in external data source
+CREATE EXTERNAL TABLE dbo.ExternalStageProduct
+(
+    ProductID NVARCHAR(10) NOT NULL,
+    ProductName NVARCHAR(200) NOT NULL,
+    ProductCategory NVARCHAR(200) NOT NULL,
+    Color NVARCHAR(10),
+    Size NVARCHAR(10),
+    ListPrice DECIMAL NOT NULL,
+    Discontinued BIT NOT NULL
+)
+WITH
+(
+    DATA_SOURCE = StagedFiles,
+    LOCATION = 'products/*.parquet',
+    FILE_FORMAT = ParquetFormat
+);
+GO
+
+#Load data warehouse tables
+
+#At a basic level, loading a data warehouse is typically achieved by adding new data from files in a data lake into tables in the data warehouse.
+#The COPY statement is an effective way to accomplish this task, as shown in the following example:
+
+COPY INTO dbo.StageProducts
+    (ProductID, ProductName, ProductCategory, Color, Size, ListPrice, Discontinued)
+FROM 'https://mydatalake.blob.core.windows.net/data/stagedfiles/products/*.parquet'
+WITH
+(
+    FILE_TYPE = 'PARQUET',
+    MAXERRORS = 0,
+    IDENTITY_INSERT = 'OFF'
+);
+
+#Query a data warehouse
+
+#Aggregating measures by dimension attributes
+#For example, the following SQL queries the FactSales and DimDate tables in a hypothetical data warehouse to aggregate sales amounts by year and quarter:
+SELECT  dates.CalendarYear,
+        dates.CalendarQuarter,
+        SUM(sales.SalesAmount) AS TotalSales
+FROM dbo.FactSales AS sales
+JOIN dbo.DimDate AS dates ON sales.OrderDateKey = dates.DateKey
+GROUP BY dates.CalendarYear, dates.CalendarQuarter
+ORDER BY dates.CalendarYear, dates.CalendarQuarter;
+
+#You can join as many dimension tables as needed to calculate the aggregations you need.
+#For example, the following code extends the previous example to break down the quarterly sales totals by city based on the customer's address details in the DimCustomer table:
+SELECT  dates.CalendarYear,
+        dates.CalendarQuarter,
+        custs.City,
+        SUM(sales.SalesAmount) AS TotalSales
+FROM dbo.FactSales AS sales
+JOIN dbo.DimDate AS dates ON sales.OrderDateKey = dates.DateKey
+JOIN dbo.DimCustomer AS custs ON sales.CustomerKey = custs.CustomerKey
+GROUP BY dates.CalendarYear, dates.CalendarQuarter, custs.City
+ORDER BY dates.CalendarYear, dates.CalendarQuarter, custs.City;
+
+#Joins in a snowflake schema
+#When using a snowflake schema, dimensions may be partially normalized; requiring multiple joins to relate fact tables to snowflake dimensions
+#For example, suppose your data warehouse includes a DimProduct dimension table from which the product categories have been normalized into a separate DimCategory table
+#A query to aggregate items sold by product category might look similar to the following example:
+
+SELECT  cat.ProductCategory,
+        SUM(sales.OrderQuantity) AS ItemsSold
+FROM dbo.FactSales AS sales
+JOIN dbo.DimProduct AS prod ON sales.ProductKey = prod.ProductKey
+JOIN dbo.DimCategory AS cat ON prod.CategoryKey = cat.CategoryKey
+GROUP BY cat.ProductCategory
+ORDER BY cat.ProductCategory;
+
+#Using ranking functions
+#Another common kind of analytical query is to partition the results based on a dimension attribute and rank the results within each partition. 
+#For example, you might want to rank stores each year by their sales revenue.
+#To accomplish this goal, you can use Transact-SQL ranking functions such as ROW_NUMBER, RANK, DENSE_RANK, and NTILE
+#For example, consider the following query:
+
+SELECT  ProductCategory,
+        ProductName,
+        ListPrice,
+        ROW_NUMBER() OVER
+            (PARTITION BY ProductCategory ORDER BY ListPrice DESC) AS RowNumber,
+        RANK() OVER
+            (PARTITION BY ProductCategory ORDER BY ListPrice DESC) AS Rank,
+        DENSE_RANK() OVER
+            (PARTITION BY ProductCategory ORDER BY ListPrice DESC) AS DenseRank,
+        NTILE(4) OVER
+            (PARTITION BY ProductCategory ORDER BY ListPrice DESC) AS Quartile
+FROM dbo.DimProduct
+ORDER BY ProductCategory;
+
+#Retrieving an approximate count
+#For example, the following query uses the COUNT function to retrieve the number of sales for each year in a hypothetical data warehouse:
+
+SELECT dates.CalendarYear AS CalendarYear,
+    COUNT(DISTINCT sales.OrderNumber) AS Orders
+FROM FactSales AS sales
+JOIN DimDate AS dates ON sales.OrderDateKey = dates.DateKey
+GROUP BY dates.CalendarYear
+ORDER BY CalendarYear;
+
+#The volume of data in a data warehouse can mean that even simple queries to count the number of records that meet specified criteria can take a considerable time to run.
+#In such cases, you can use the APPROX_COUNT_DISTINCT function as shown in the following example:
+
+SELECT dates.CalendarYear AS CalendarYear,
+    APPROX_COUNT_DISTINCT(sales.OrderNumber) AS ApproxOrders
+FROM FactSales AS sales
+JOIN DimDate AS dates ON sales.OrderDateKey = dates.DateKey
+GROUP BY dates.CalendarYear
+ORDER BY CalendarYear;
+
+
+
+
